@@ -1,29 +1,43 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
 @main
 struct CIStatusApp: App {
-    @StateObject private var model = ActionsStatusModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            ActionsMenu(model: model)
-        } label: {
-            Label(model.menuTitle, systemImage: model.menuIcon)
-        }
-        .menuBarExtraStyle(.menu)
-
         Settings {
-            SettingsView(model: model)
+            SettingsView(model: appDelegate.model)
         }
     }
 }
 
 @MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let model = ActionsStatusModel()
+    private var statusMenuController: StatusMenuController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusMenuController = StatusMenuController(model: model)
+    }
+}
+
+@MainActor
 final class ActionsStatusModel: ObservableObject {
-    @AppStorage("repository") var repository: String = ProcessInfo.processInfo.environment["GITHUB_REPOSITORY"] ?? ""
-    @AppStorage("refreshInterval") var refreshInterval: Double = 60
+    @Published var repository: String {
+        didSet {
+            UserDefaults.standard.set(repository, forKey: "repository")
+        }
+    }
+
+    @Published var refreshInterval: Double {
+        didSet {
+            UserDefaults.standard.set(refreshInterval, forKey: "refreshInterval")
+            startPolling()
+        }
+    }
 
     @Published private(set) var runs: [WorkflowRun] = []
     @Published private(set) var state: LoadState = .idle
@@ -67,6 +81,9 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     init() {
+        repository = UserDefaults.standard.string(forKey: "repository") ?? ProcessInfo.processInfo.environment["GITHUB_REPOSITORY"] ?? ""
+        let savedRefreshInterval = UserDefaults.standard.double(forKey: "refreshInterval")
+        refreshInterval = savedRefreshInterval == 0 ? 60 : savedRefreshInterval
         startPolling()
     }
 
@@ -134,81 +151,273 @@ enum LoadState: Equatable {
     case failed(String)
 }
 
-struct ActionsMenu: View {
-    @ObservedObject var model: ActionsStatusModel
+@MainActor
+final class StatusMenuController {
+    private let model: ActionsStatusModel
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let menu = NSMenu()
+    private let settingsWindowController: SettingsWindowController
+    private var cancellables: Set<AnyCancellable> = []
 
-    var body: some View {
+    init(model: ActionsStatusModel) {
+        self.model = model
+        settingsWindowController = SettingsWindowController(model: model)
+
+        menu.autoenablesItems = false
+        statusItem.menu = menu
+
+        if let button = statusItem.button {
+            button.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        }
+
+        bindModel()
+        rebuild()
+    }
+
+    private func bindModel() {
+        Publishers.MergeMany([
+            model.$repository.map { _ in () }.eraseToAnyPublisher(),
+            model.$refreshInterval.map { _ in () }.eraseToAnyPublisher(),
+            model.$runs.map { _ in () }.eraseToAnyPublisher(),
+            model.$state.map { _ in () }.eraseToAnyPublisher(),
+            model.$lastUpdated.map { _ in () }.eraseToAnyPublisher()
+        ])
+        .receive(on: RunLoop.main)
+        .sink { [weak self] in
+            self?.rebuild()
+        }
+        .store(in: &cancellables)
+    }
+
+    private func rebuild() {
+        statusItem.button?.title = model.menuTitle
+
+        menu.removeAllItems()
+
         let trimmedRepository = model.repository.trimmingCharacters(in: .whitespacesAndNewlines)
-
         if trimmedRepository.isEmpty {
-            Text("No repository configured")
-            SettingsLink {
-                Text("⚙️ Set Repository...")
+            addInfoRow(title: "No repository configured", subtitle: "Choose a repo to watch", icon: .settings)
+            addActionRow(title: "Set Repository", icon: .settings) { [weak self] in
+                self?.showSettings()
             }
-            Divider()
+            addSeparator()
         } else {
-            Text(trimmedRepository)
-            statusSummary
+            addInfoRow(title: trimmedRepository, subtitle: nil, icon: .repository)
+            addStatusSummary()
+            addSeparator()
 
-            Divider()
-
-            Button("↗ Open Actions") {
-                model.openRepositoryActions()
+            addActionRow(title: "Open Actions", icon: .externalLink) { [weak self] in
+                self?.model.openRepositoryActions()
             }
 
-            Button("⚡ Open Latest Run") {
-                model.openLatestRun()
+            addActionRow(title: "Open Latest Run", icon: .bolt, isEnabled: model.latestRun != nil) { [weak self] in
+                self?.model.openLatestRun()
             }
-            .disabled(model.latestRun == nil)
 
-            Divider()
+            addSeparator()
 
             if model.runs.isEmpty {
-                Text("No workflow runs")
+                addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
             } else {
-                ForEach(model.runs.prefix(5)) { run in
-                    Button(run.menuTitle) {
-                        model.openRun(run)
-                    }
+                for run in model.runs.prefix(5) {
+                    addRunRow(run)
                 }
             }
 
-            Divider()
-            SettingsLink {
-                Text("⚙️ Settings...")
+            addSeparator()
+            addActionRow(title: "Settings", icon: .settings) { [weak self] in
+                self?.showSettings()
             }
         }
 
-        Button("↻ Refresh") {
-            Task { await model.refresh() }
+        addActionRow(title: "Refresh", icon: .refresh) { [weak self] in
+            Task {
+                await self?.model.refresh()
+            }
         }
-        .keyboardShortcut("r")
 
-        Divider()
+        addSeparator()
 
-        Button("⏻ Quit CIStatus") {
-            model.quit()
+        addActionRow(title: "Quit CIStatus", icon: .power) { [weak self] in
+            self?.model.quit()
         }
-        .keyboardShortcut("q")
+    }
+
+    private func addStatusSummary() {
+        switch model.state {
+        case .loading where model.runs.isEmpty:
+            addInfoRow(title: "Loading...", subtitle: nil, icon: .status(.running))
+        case .failed(let message):
+            addInfoRow(title: "Could not load Actions", subtitle: message, icon: .status(.failure))
+        default:
+            if let latestRun = model.latestRun {
+                let subtitle = model.lastUpdated.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" }
+                addInfoRow(title: latestRun.displayTitle, subtitle: subtitle, icon: .status(latestRun.statusKind))
+            } else {
+                addInfoRow(title: "Waiting for status", subtitle: nil, icon: .empty)
+            }
+        }
+    }
+
+    private func addRunRow(_ run: WorkflowRun) {
+        addActionRow(title: run.displayTitle, subtitle: run.detail, icon: .status(run.statusKind)) { [weak self] in
+            self?.model.openRun(run)
+        }
+    }
+
+    private func addInfoRow(title: String, subtitle: String?, icon: MenuIcon) {
+        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: false, action: nil)
+    }
+
+    private func addActionRow(title: String, subtitle: String? = nil, icon: MenuIcon, isEnabled: Bool = true, action: @escaping () -> Void) {
+        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: isEnabled, action: action)
+    }
+
+    private func addCustomItem(title: String, subtitle: String?, icon: MenuIcon, isEnabled: Bool, action: (() -> Void)?) {
+        let item = NSMenuItem()
+        item.isEnabled = isEnabled
+
+        let height: CGFloat = subtitle == nil ? 34 : 48
+        let row = MenuRowView(
+            title: title,
+            subtitle: subtitle,
+            icon: icon,
+            isEnabled: isEnabled,
+            isInteractive: action != nil,
+            action: { [weak self] in
+                self?.menu.cancelTracking()
+                action?()
+            }
+        )
+        let hostingView = NSHostingView(rootView: row)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: height)
+        item.view = hostingView
+        menu.addItem(item)
+    }
+
+    private func addSeparator() {
+        menu.addItem(.separator())
+    }
+
+    private func showSettings() {
+        settingsWindowController.show()
+    }
+}
+
+@MainActor
+final class SettingsWindowController {
+    private let window: NSWindow
+
+    init(model: ActionsStatusModel) {
+        let hostingController = NSHostingController(rootView: SettingsView(model: model))
+        window = NSWindow(contentViewController: hostingController)
+        window.title = "CIStatus Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+        window.center()
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+}
+
+enum MenuIcon {
+    case status(StatusKind)
+    case repository
+    case externalLink
+    case bolt
+    case settings
+    case refresh
+    case power
+    case empty
+}
+
+struct MenuRowView: View {
+    let title: String
+    let subtitle: String?
+    let icon: MenuIcon
+    let isEnabled: Bool
+    let isInteractive: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            iconView
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: subtitle == nil ? .regular : .medium))
+                    .lineLimit(1)
+                    .foregroundStyle(foregroundStyle)
+
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, subtitle == nil ? 7 : 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(background)
+        .contentShape(Rectangle())
+        .opacity(isEnabled ? 1 : 0.5)
+        .onHover { hovering in
+            isHovered = hovering && isEnabled && isInteractive
+        }
+        .onTapGesture {
+            guard isEnabled, isInteractive else { return }
+            action()
+        }
     }
 
     @ViewBuilder
-    private var statusSummary: some View {
-        switch model.state {
-        case .loading where model.runs.isEmpty:
-            Text("🔵 Loading...")
-        case .failed(let message):
-            Text("🔴 Error: \(message)")
-        default:
-            if let latestRun = model.latestRun {
-                Text(latestRun.menuTitle)
-                if let lastUpdated = model.lastUpdated {
-                    Text("Updated \(lastUpdated.formatted(date: .omitted, time: .shortened))")
-                }
-            } else {
-                Text("Waiting for status")
-            }
+    private var iconView: some View {
+        switch icon {
+        case .status(let statusKind):
+            Circle()
+                .fill(statusKind.color)
+                .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
+                .shadow(color: statusKind.color.opacity(0.45), radius: 1.5, y: 1)
+        case .repository:
+            Image(systemName: "tray.full")
+                .foregroundStyle(.secondary)
+        case .externalLink:
+            Image(systemName: "arrow.up.right.square")
+                .foregroundStyle(.secondary)
+        case .bolt:
+            Image(systemName: "bolt.fill")
+                .foregroundStyle(.orange)
+        case .settings:
+            Image(systemName: "gearshape")
+                .foregroundStyle(.secondary)
+        case .refresh:
+            Image(systemName: "arrow.clockwise")
+                .foregroundStyle(.secondary)
+        case .power:
+            Image(systemName: "power")
+                .foregroundStyle(.secondary)
+        case .empty:
+            Circle()
+                .stroke(.secondary.opacity(0.5), lineWidth: 1.5)
         }
+    }
+
+    private var background: some ShapeStyle {
+        isHovered ? AnyShapeStyle(Color.accentColor.opacity(0.18)) : AnyShapeStyle(Color.clear)
+    }
+
+    private var foregroundStyle: some ShapeStyle {
+        isHovered ? AnyShapeStyle(Color.primary) : AnyShapeStyle(Color.primary)
     }
 }
 
@@ -377,6 +586,10 @@ struct WorkflowRun: Decodable, Identifiable {
 
     var menuTitle: String {
         "\(statusKind.symbol) \(name) - \(branch)"
+    }
+
+    var displayTitle: String {
+        "\(name) - \(branch)"
     }
 }
 
