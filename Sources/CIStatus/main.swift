@@ -284,25 +284,27 @@ final class StatusMenuController {
 
         addSection(title: "Needs Attention", runs: sections.unresolvedFailures, emptyTitle: "No unresolved failures")
         addSeparator()
-        addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs")
+        addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs") { run in
+            sections.activeRunDetail(for: run)
+        }
         addSeparator()
         addSection(title: "Recently Passed", runs: sections.recentPasses, emptyTitle: "No recent passes")
     }
 
-    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String) {
+    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> String? = { $0.detail }) {
         addHeaderRow(title)
 
         if runs.isEmpty {
             addInfoRow(title: emptyTitle, subtitle: nil, icon: .empty)
         } else {
             for run in runs {
-                addRunRow(run)
+                addRunRow(run, detail: detail(run))
             }
         }
     }
 
-    private func addRunRow(_ run: WorkflowRun) {
-        addActionRow(title: run.displayTitle, subtitle: run.detail, icon: .status(run.statusKind)) { [weak self] in
+    private func addRunRow(_ run: WorkflowRun, detail: String?) {
+        addActionRow(title: run.displayTitle, subtitle: detail, icon: .status(run.statusKind)) { [weak self] in
             self?.model.openRun(run)
         }
     }
@@ -641,6 +643,7 @@ struct RunSections {
     let unresolvedFailures: [WorkflowRun]
     let activeRuns: [WorkflowRun]
     let recentPasses: [WorkflowRun]
+    private let priorCompletedByActiveRunID: [Int: WorkflowRun]
 
     var isEmpty: Bool {
         unresolvedFailures.isEmpty && activeRuns.isEmpty && recentPasses.isEmpty
@@ -651,9 +654,21 @@ struct RunSections {
         var newerPassedKeys = Set<String>()
         var includedFailureKeys = Set<String>()
         var includedPassKeys = Set<String>()
+        var activeKeys = Set<String>()
+        var priorCompletedByActiveRunID: [Int: WorkflowRun] = [:]
         var unresolvedFailures: [WorkflowRun] = []
         var activeRuns: [WorkflowRun] = []
         var recentPasses: [WorkflowRun] = []
+
+        for (index, run) in newestFirst.enumerated() where run.statusKind == .running || run.statusKind == .queued {
+            activeKeys.insert(run.workflowBranchKey)
+            priorCompletedByActiveRunID[run.id] = newestFirst[(index + 1)...]
+                .first { candidate in
+                    candidate.workflowBranchKey == run.workflowBranchKey &&
+                        candidate.statusKind != .running &&
+                        candidate.statusKind != .queued
+                }
+        }
 
         for run in newestFirst {
             switch run.statusKind {
@@ -663,7 +678,8 @@ struct RunSections {
                 }
                 newerPassedKeys.insert(run.workflowBranchKey)
             case .failure:
-                guard !newerPassedKeys.contains(run.workflowBranchKey),
+                guard !activeKeys.contains(run.workflowBranchKey),
+                      !newerPassedKeys.contains(run.workflowBranchKey),
                       includedFailureKeys.insert(run.workflowBranchKey).inserted else {
                     continue
                 }
@@ -678,6 +694,24 @@ struct RunSections {
         self.unresolvedFailures = Array(unresolvedFailures.prefix(5))
         self.activeRuns = activeRuns
         self.recentPasses = Array(recentPasses.prefix(5))
+        self.priorCompletedByActiveRunID = priorCompletedByActiveRunID
+    }
+
+    func activeRunDetail(for run: WorkflowRun) -> String {
+        guard let priorCompletedRun = priorCompletedByActiveRunID[run.id] else {
+            return run.detail
+        }
+
+        switch priorCompletedRun.statusKind {
+        case .failure:
+            return "\(run.detail) - previous completed run failed"
+        case .success:
+            return "\(run.detail) - previous completed run passed"
+        case .cancelled:
+            return "\(run.detail) - previous completed run stopped"
+        case .running, .queued:
+            return run.detail
+        }
     }
 }
 
