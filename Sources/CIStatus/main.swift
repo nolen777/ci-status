@@ -55,12 +55,12 @@ final class ActionsStatusModel: ObservableObject {
         case .idle where runs.isEmpty:
             return "CI"
         default:
-            return latestRun?.compactStatusTitle ?? "CI"
+            return menuStatusKind.compactStatusTitle
         }
     }
 
     var menuIcon: String {
-        switch latestRun?.statusKind {
+        switch menuStatusKind {
         case .success:
             return "checkmark.circle.fill"
         case .failure:
@@ -71,13 +71,42 @@ final class ActionsStatusModel: ObservableObject {
             return "clock.fill"
         case .cancelled:
             return "slash.circle.fill"
-        case .none:
-            return "circle.dashed"
         }
     }
 
     var latestRun: WorkflowRun? {
         runs.first
+    }
+
+    var menuStatusKind: StatusKind {
+        if runs.contains(where: { $0.statusKind == .running || $0.statusKind == .queued }) {
+            return .running
+        }
+
+        let mainRuns = runs
+            .filter { $0.branch == "main" }
+            .sorted { $0.createdAt > $1.createdAt }
+        var activeKeys = Set<String>()
+        var resolvedKeys = Set<String>()
+
+        for run in mainRuns {
+            switch run.statusKind {
+            case .running, .queued:
+                activeKeys.insert(run.workflowBranchKey)
+            case .success:
+                resolvedKeys.insert(run.workflowBranchKey)
+            case .failure:
+                guard !activeKeys.contains(run.workflowBranchKey),
+                      !resolvedKeys.contains(run.workflowBranchKey) else {
+                    continue
+                }
+                return .failure
+            case .cancelled:
+                continue
+            }
+        }
+
+        return .success
     }
 
     init() {
@@ -672,6 +701,25 @@ enum StatusKind {
         case .cancelled:
             return "slash.circle.fill"
         }
+    }
+
+    var compactStatus: String {
+        switch self {
+        case .success:
+            return "CI OK"
+        case .failure:
+            return "CI Failed"
+        case .running:
+            return "CI Running"
+        case .queued:
+            return "CI Queued"
+        case .cancelled:
+            return "CI Stopped"
+        }
+    }
+
+    var compactStatusTitle: String {
+        "\(symbol) \(compactStatus)"
     }
 
     var color: Color {
