@@ -26,9 +26,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class ActionsStatusModel: ObservableObject {
-    @Published var repository: String {
+    @Published var availableRepositories: [String] {
         didSet {
-            UserDefaults.standard.set(repository, forKey: "repository")
+            UserDefaults.standard.set(availableRepositories, forKey: "availableRepositories")
+        }
+    }
+
+    @Published var selectedRepositories: [String] {
+        didSet {
+            UserDefaults.standard.set(selectedRepositories, forKey: "selectedRepositories")
+            UserDefaults.standard.set(selectedRepositories.first ?? "", forKey: "repository")
         }
     }
 
@@ -78,6 +85,17 @@ final class ActionsStatusModel: ObservableObject {
         runs.first
     }
 
+    var repositoryMenuTitle: String {
+        switch selectedRepositories.count {
+        case 0:
+            return "Repositories"
+        case 1:
+            return selectedRepositories[0]
+        default:
+            return "\(selectedRepositories.count) repositories"
+        }
+    }
+
     var menuStatusKind: StatusKind {
         if runs.contains(where: { $0.statusKind == .running || $0.statusKind == .queued }) {
             return .running
@@ -110,7 +128,11 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     init() {
-        repository = UserDefaults.standard.string(forKey: "repository") ?? ProcessInfo.processInfo.environment["GITHUB_REPOSITORY"] ?? ""
+        let legacyRepository = UserDefaults.standard.string(forKey: "repository") ?? ProcessInfo.processInfo.environment["GITHUB_REPOSITORY"] ?? ""
+        let savedAvailableRepositories = UserDefaults.standard.stringArray(forKey: "availableRepositories") ?? []
+        let savedSelectedRepositories = UserDefaults.standard.stringArray(forKey: "selectedRepositories") ?? []
+        availableRepositories = Self.uniqueRepositories(savedAvailableRepositories + [legacyRepository])
+        selectedRepositories = Self.uniqueRepositories(savedSelectedRepositories.isEmpty ? [legacyRepository] : savedSelectedRepositories)
         let savedRefreshInterval = UserDefaults.standard.double(forKey: "refreshInterval")
         refreshInterval = savedRefreshInterval == 0 ? 60 : savedRefreshInterval
         startPolling()
@@ -133,8 +155,8 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     func refresh() async {
-        let trimmedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedRepository.isEmpty else {
+        let repositories = Self.uniqueRepositories(selectedRepositories)
+        guard !repositories.isEmpty else {
             runs = []
             state = .idle
             return
@@ -142,7 +164,15 @@ final class ActionsStatusModel: ObservableObject {
 
         state = .loading
         do {
-            runs = try await client.fetchRuns(repository: trimmedRepository)
+            var fetchedRuns: [WorkflowRun] = []
+            for repository in repositories {
+                fetchedRuns += try await client.fetchRuns(repository: repository).map { run in
+                    var repositoryRun = run
+                    repositoryRun.sourceRepository = repository
+                    return repositoryRun
+                }
+            }
+            runs = fetchedRuns.sorted { $0.createdAt > $1.createdAt }
             lastUpdated = Date()
             state = .loaded
         } catch {
@@ -150,26 +180,71 @@ final class ActionsStatusModel: ObservableObject {
         }
     }
 
-    func openLatestRun() {
-        guard let url = latestRun?.htmlURL else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     func openRun(_ run: WorkflowRun) {
         NSWorkspace.shared.open(run.htmlURL)
     }
 
-    func openRepositoryActions() {
-        let trimmedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedRepository.isEmpty,
-              let url = URL(string: "https://github.com/\(trimmedRepository)/actions") else {
+    func toggleRepository(_ repository: String) {
+        let repository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repository.isEmpty else {
             return
         }
-        NSWorkspace.shared.open(url)
+
+        if selectedRepositories.contains(repository) {
+            selectedRepositories.removeAll { $0 == repository }
+        } else {
+            selectedRepositories.append(repository)
+        }
+
+        Task {
+            await refresh()
+        }
+    }
+
+    func addRepository(_ repository: String) {
+        let repository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidRepository(repository) else {
+            return
+        }
+
+        availableRepositories = Self.uniqueRepositories(availableRepositories + [repository])
+        if !selectedRepositories.contains(repository) {
+            selectedRepositories.append(repository)
+        }
+
+        Task {
+            await refresh()
+        }
     }
 
     func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    static func isValidRepository(_ repository: String) -> Bool {
+        let pieces = repository.split(separator: "/", omittingEmptySubsequences: false)
+        guard pieces.count == 2 else {
+            return false
+        }
+        return pieces.allSatisfy { piece in
+            !piece.isEmpty && piece.allSatisfy { character in
+                character.isLetter || character.isNumber || character == "-" || character == "_" || character == "."
+            }
+        }
+    }
+
+    private static func uniqueRepositories(_ repositories: [String]) -> [String] {
+        var seen = Set<String>()
+        var uniqueRepositories: [String] = []
+
+        for repository in repositories.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+            guard isValidRepository(repository), seen.insert(repository).inserted else {
+                continue
+            }
+            uniqueRepositories.append(repository)
+        }
+
+        return uniqueRepositories
     }
 }
 
@@ -181,7 +256,7 @@ enum LoadState: Equatable {
 }
 
 @MainActor
-final class StatusMenuController {
+final class StatusMenuController: NSObject {
     private let model: ActionsStatusModel
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
@@ -189,6 +264,7 @@ final class StatusMenuController {
 
     init(model: ActionsStatusModel) {
         self.model = model
+        super.init()
 
         menu.autoenablesItems = false
         statusItem.menu = menu
@@ -203,7 +279,8 @@ final class StatusMenuController {
 
     private func bindModel() {
         Publishers.MergeMany([
-            model.$repository.map { _ in () }.eraseToAnyPublisher(),
+            model.$availableRepositories.map { _ in () }.eraseToAnyPublisher(),
+            model.$selectedRepositories.map { _ in () }.eraseToAnyPublisher(),
             model.$refreshInterval.map { _ in () }.eraseToAnyPublisher(),
             model.$runs.map { _ in () }.eraseToAnyPublisher(),
             model.$state.map { _ in () }.eraseToAnyPublisher(),
@@ -221,23 +298,13 @@ final class StatusMenuController {
 
         menu.removeAllItems()
 
-        let trimmedRepository = model.repository.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedRepository.isEmpty {
-            addInfoRow(title: "No repository configured", subtitle: "Set GITHUB_REPOSITORY or saved repository defaults", icon: .empty)
+        addRepositoryMenu()
+
+        if model.selectedRepositories.isEmpty {
+            addInfoRow(title: "No repositories selected", subtitle: "Choose at least one repository", icon: .empty)
             addSeparator()
         } else {
-            addInfoRow(title: trimmedRepository, subtitle: nil, icon: .repository)
             addStatusSummary()
-            addSeparator()
-
-            addActionRow(title: "Open Actions", icon: .externalLink) { [weak self] in
-                self?.model.openRepositoryActions()
-            }
-
-            addActionRow(title: "Open Latest Run", icon: .bolt, isEnabled: model.latestRun != nil) { [weak self] in
-                self?.model.openLatestRun()
-            }
-
             addSeparator()
 
             addRunSections()
@@ -258,6 +325,52 @@ final class StatusMenuController {
         }
     }
 
+    private func addRepositoryMenu() {
+        let item = NSMenuItem(title: model.repositoryMenuTitle, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "tray.full", accessibilityDescription: nil)
+
+        let submenu = NSMenu(title: "Repositories")
+        for repository in model.availableRepositories {
+            let repositoryItem = NSMenuItem(title: repository, action: #selector(toggleRepository(_:)), keyEquivalent: "")
+            repositoryItem.target = self
+            repositoryItem.representedObject = repository
+            repositoryItem.state = model.selectedRepositories.contains(repository) ? .on : .off
+            submenu.addItem(repositoryItem)
+        }
+
+        if !model.availableRepositories.isEmpty {
+            submenu.addItem(.separator())
+        }
+
+        let clipboardRepository = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let addClipboardItem = NSMenuItem(title: "Add Repository from Clipboard", action: #selector(addRepositoryFromClipboard(_:)), keyEquivalent: "")
+        addClipboardItem.target = self
+        addClipboardItem.isEnabled = ActionsStatusModel.isValidRepository(clipboardRepository) &&
+            !model.availableRepositories.contains(clipboardRepository)
+        if addClipboardItem.isEnabled {
+            addClipboardItem.title = "Add \(clipboardRepository)"
+            addClipboardItem.representedObject = clipboardRepository
+        }
+        submenu.addItem(addClipboardItem)
+        addRepositoryEntryItem(to: submenu)
+
+        item.submenu = submenu
+        menu.addItem(item)
+        addSeparator()
+    }
+
+    private func addRepositoryEntryItem(to submenu: NSMenu) {
+        let item = NSMenuItem()
+        let row = AddRepositoryMenuItemView(existingRepositories: model.availableRepositories) { [weak self] repository in
+            self?.menu.cancelTracking()
+            self?.model.addRepository(repository)
+        }
+        row.frame = NSRect(x: 0, y: 0, width: 300, height: 42)
+        item.view = row
+        submenu.addItem(item)
+    }
+
     private func addStatusSummary() {
         switch model.state {
         case .loading where model.runs.isEmpty:
@@ -265,13 +378,37 @@ final class StatusMenuController {
         case .failed(let message):
             addInfoRow(title: "Could not load Actions", subtitle: message, icon: .status(.failure))
         default:
-            if let latestRun = model.latestRun {
-                let subtitle = model.lastUpdated.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" }
-                addInfoRow(title: latestRun.displayTitle, subtitle: subtitle, icon: .status(latestRun.statusKind))
-            } else {
+            let sections = RunSections(runs: model.runs)
+            if sections.isEmpty {
                 addInfoRow(title: "Waiting for status", subtitle: nil, icon: .empty)
+            } else {
+                addInfoRow(title: summaryTitle(for: sections), subtitle: summarySubtitle, icon: .status(model.menuStatusKind))
             }
         }
+    }
+
+    private func summaryTitle(for sections: RunSections) -> String {
+        let failures = sections.unresolvedFailures.count
+        let active = sections.activeRuns.count
+
+        if active > 0 && failures > 0 {
+            return "\(active) active, \(failures) need attention"
+        }
+        if active > 0 {
+            return "\(active) active"
+        }
+        if failures > 0 {
+            return "\(failures) need attention"
+        }
+        return "All selected repos passing"
+    }
+
+    private var summarySubtitle: String {
+        var pieces = ["\(model.selectedRepositories.count) \(model.selectedRepositories.count == 1 ? "repository" : "repositories")"]
+        if let lastUpdated = model.lastUpdated {
+            pieces.append("updated \(lastUpdated.formatted(date: .omitted, time: .shortened))")
+        }
+        return pieces.joined(separator: " - ")
     }
 
     private func addRunSections() {
@@ -347,14 +484,25 @@ final class StatusMenuController {
     private func addSeparator() {
         menu.addItem(.separator())
     }
+
+    @objc private func toggleRepository(_ sender: NSMenuItem) {
+        guard let repository = sender.representedObject as? String else {
+            return
+        }
+        model.toggleRepository(repository)
+    }
+
+    @objc private func addRepositoryFromClipboard(_ sender: NSMenuItem) {
+        guard let repository = sender.representedObject as? String else {
+            return
+        }
+        model.addRepository(repository)
+    }
 }
 
 enum MenuIcon {
     case status(StatusKind)
     case repository
-    case externalLink
-    case bolt
-    case settings
     case refresh
     case power
     case empty
@@ -432,15 +580,6 @@ struct MenuRowView: View {
         case .repository:
             Image(systemName: "tray.full")
                 .foregroundStyle(.secondary)
-        case .externalLink:
-            Image(systemName: "arrow.up.right.square")
-                .foregroundStyle(.secondary)
-        case .bolt:
-            Image(systemName: "bolt.fill")
-                .foregroundStyle(.orange)
-        case .settings:
-            Image(systemName: "gearshape")
-                .foregroundStyle(.secondary)
         case .refresh:
             Image(systemName: "arrow.clockwise")
                 .foregroundStyle(.secondary)
@@ -488,6 +627,111 @@ struct MenuRowView: View {
 
     private var foregroundStyle: some ShapeStyle {
         isHovered ? AnyShapeStyle(Color.primary) : AnyShapeStyle(Color.primary)
+    }
+}
+
+final class AddRepositoryMenuItemView: NSView, NSTextFieldDelegate {
+    private let existingRepositories: [String]
+    private let addRepository: (String) -> Void
+    private let textField = FocusingTextField()
+    private let addButton = NSButton(title: "Add", target: nil, action: nil)
+
+    init(existingRepositories: [String], addRepository: @escaping (String) -> Void) {
+        self.existingRepositories = existingRepositories
+        self.addRepository = addRepository
+        super.init(frame: .zero)
+
+        textField.delegate = self
+        textField.placeholderString = "owner/repo"
+        textField.font = .systemFont(ofSize: 13)
+        textField.isBordered = true
+        textField.isBezeled = true
+        textField.bezelStyle = .roundedBezel
+        textField.focusRingType = .default
+        textField.controlSize = .small
+        textField.target = self
+        textField.action = #selector(addIfValid)
+        textField.translatesAutoresizingMaskIntoConstraints = false
+
+        addButton.target = self
+        addButton.action = #selector(addIfValid)
+        addButton.bezelStyle = .rounded
+        addButton.controlSize = .small
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(textField)
+        addSubview(addButton)
+
+        NSLayoutConstraint.activate([
+            textField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            textField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textField.trailingAnchor.constraint(equalTo: addButton.leadingAnchor, constant: -8),
+            textField.heightAnchor.constraint(equalToConstant: 24),
+
+            addButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            addButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            addButton.widthAnchor.constraint(equalToConstant: 54)
+        ])
+
+        updateButtonState()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(textField)
+        super.mouseDown(with: event)
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        updateButtonState()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)) else {
+            return false
+        }
+        addIfValid()
+        return true
+    }
+
+    @objc private func addIfValid() {
+        let repository = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canAdd(repository) else {
+            NSSound.beep()
+            return
+        }
+        addRepository(repository)
+    }
+
+    private func updateButtonState() {
+        addButton.isEnabled = canAdd(textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func canAdd(_ repository: String) -> Bool {
+        ActionsStatusModel.isValidRepository(repository) &&
+            !existingRepositories.contains(repository)
+    }
+}
+
+final class FocusingTextField: NSTextField {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
     }
 }
 
@@ -570,6 +814,7 @@ struct WorkflowRun: Decodable, Identifiable {
     let htmlURL: URL
     let createdAt: Date
     let updatedAt: Date
+    var sourceRepository = ""
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -623,7 +868,8 @@ struct WorkflowRun: Decodable, Identifiable {
 
     var detail: String {
         let statusText = conclusion ?? status
-        return "\(branch) - \(event) - \(statusText)"
+        let repositoryPrefix = sourceRepository.isEmpty ? "" : "\(sourceRepository) - "
+        return "\(repositoryPrefix)\(branch) - \(event) - \(statusText)"
     }
 
     var menuTitle: String {
@@ -635,7 +881,7 @@ struct WorkflowRun: Decodable, Identifiable {
     }
 
     var workflowBranchKey: String {
-        "\(name)\u{1F}\(branch)"
+        "\(sourceRepository)\u{1F}\(name)\u{1F}\(branch)"
     }
 }
 
