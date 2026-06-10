@@ -304,9 +304,6 @@ final class StatusMenuController: NSObject {
             addInfoRow(title: "No repositories selected", subtitle: "Choose at least one repository", icon: .empty)
             addSeparator()
         } else {
-            addStatusSummary()
-            addSeparator()
-
             addRunSections()
 
             addSeparator()
@@ -371,61 +368,35 @@ final class StatusMenuController: NSObject {
         submenu.addItem(item)
     }
 
-    private func addStatusSummary() {
-        switch model.state {
-        case .loading where model.runs.isEmpty:
-            addInfoRow(title: "Loading...", subtitle: nil, icon: .status(.running))
-        case .failed(let message):
-            addInfoRow(title: "Could not load Actions", subtitle: message, icon: .status(.failure))
-        default:
-            let sections = RunSections(runs: model.runs)
-            if sections.isEmpty {
-                addInfoRow(title: "Waiting for status", subtitle: nil, icon: .empty)
-            } else {
-                addInfoRow(title: summaryTitle(for: sections), subtitle: summarySubtitle, icon: .status(model.menuStatusKind))
-            }
-        }
-    }
-
-    private func summaryTitle(for sections: RunSections) -> String {
-        let failures = sections.unresolvedFailures.count
-        let active = sections.activeRuns.count
-
-        if active > 0 && failures > 0 {
-            return "\(active) active, \(failures) need attention"
-        }
-        if active > 0 {
-            return "\(active) active"
-        }
-        if failures > 0 {
-            return "\(failures) need attention"
-        }
-        return "All selected repos passing"
-    }
-
-    private var summarySubtitle: String {
-        var pieces = ["\(model.selectedRepositories.count) \(model.selectedRepositories.count == 1 ? "repository" : "repositories")"]
-        if let lastUpdated = model.lastUpdated {
-            pieces.append("updated \(lastUpdated.formatted(date: .omitted, time: .shortened))")
-        }
-        return pieces.joined(separator: " - ")
-    }
-
     private func addRunSections() {
         let sections = RunSections(runs: model.runs)
 
         if sections.isEmpty {
-            addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
+            addEmptyRunsRow()
             return
         }
 
-        addSection(title: "Needs Attention", runs: sections.unresolvedFailures, emptyTitle: "No unresolved failures")
-        addSeparator()
+        if !sections.unresolvedFailures.isEmpty {
+            addSection(title: "Needs Attention", runs: sections.unresolvedFailures, emptyTitle: "No unresolved failures")
+            addSeparator()
+        }
+
         addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs") { run in
             sections.activeRunDetail(for: run)
         }
         addSeparator()
         addSection(title: "Recently Passed", runs: sections.recentPasses, emptyTitle: "No recent passes")
+    }
+
+    private func addEmptyRunsRow() {
+        switch model.state {
+        case .loading:
+            addInfoRow(title: "Loading...", subtitle: nil, icon: .status(.running))
+        case .failed(let message):
+            addInfoRow(title: "Could not load Actions", subtitle: message, icon: .status(.failure))
+        default:
+            addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
+        }
     }
 
     private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> String? = { $0.detail }) {
