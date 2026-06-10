@@ -384,10 +384,16 @@ struct MenuRowView: View {
     private var iconView: some View {
         switch icon {
         case .status(let statusKind):
-            Circle()
-                .fill(statusKind.color)
-                .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
-                .shadow(color: statusKind.color.opacity(0.45), radius: 1.5, y: 1)
+            ZStack {
+                Circle()
+                    .fill(statusKind.color)
+                    .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
+                    .shadow(color: statusKind.color.opacity(0.45), radius: 1.5, y: 1)
+
+                Image(systemName: statusKind.badgeSymbolName)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+            }
         case .repository:
             Image(systemName: "tray.full")
                 .foregroundStyle(.secondary)
@@ -642,6 +648,21 @@ enum StatusKind {
             return "🟠"
         case .cancelled:
             return "⚪"
+        }
+    }
+
+    var badgeSymbolName: String {
+        switch self {
+        case .success:
+            return "checkmark"
+        case .failure:
+            return "xmark"
+        case .running:
+            return "arrow.triangle.2.circlepath"
+        case .queued:
+            return "clock.fill"
+        case .cancelled:
+            return "slash"
         }
     }
 }
