@@ -716,7 +716,8 @@ struct GitHubActionsClient {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("CIStatus", forHTTPHeaderField: "User-Agent")
 
-        if let token = Self.token() {
+        let token = Self.token()
+        if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
@@ -727,7 +728,7 @@ struct GitHubActionsClient {
 
         guard (200..<300).contains(httpResponse.statusCode) else {
             let apiError = try? JSONDecoder().decode(APIError.self, from: data)
-            throw ClientError.api(httpResponse.statusCode, apiError?.message)
+            throw ClientError.api(httpResponse.statusCode, apiError?.message, isAuthenticated: token != nil)
         }
 
         let decoder = JSONDecoder()
@@ -736,13 +737,22 @@ struct GitHubActionsClient {
     }
 
     private static func token() -> String? {
-        if let environmentToken = ProcessInfo.processInfo.environment["GITHUB_TOKEN"],
-           !environmentToken.isEmpty {
-            return environmentToken
+        for variableName in ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT"] {
+            if let environmentToken = ProcessInfo.processInfo.environment[variableName]?.nilIfBlank {
+                return environmentToken
+            }
+        }
+
+        return ghToken()
+    }
+
+    private static func ghToken() -> String? {
+        guard let ghExecutableURL = ghExecutableURL() else {
+            return nil
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/gh")
+        process.executableURL = ghExecutableURL
         process.arguments = ["auth", "token"]
 
         let pipe = Pipe()
@@ -763,7 +773,33 @@ struct GitHubActionsClient {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty
+            .nilIfBlank
+    }
+
+    private static func ghExecutableURL() -> URL? {
+        let candidatePaths = [
+            "/opt/homebrew/bin/gh",
+            "/usr/local/bin/gh",
+            "/usr/bin/gh"
+        ]
+
+        for path in candidatePaths where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+
+        let searchPaths = ProcessInfo.processInfo.environment["PATH"]?
+            .split(separator: ":")
+            .map(String.init) ?? []
+        let fallbackSearchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
+        for directory in searchPaths + fallbackSearchPaths {
+            let path = URL(fileURLWithPath: directory).appendingPathComponent("gh").path
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+
+        return nil
     }
 }
 
@@ -1026,7 +1062,7 @@ struct APIError: Decodable {
 enum ClientError: LocalizedError {
     case invalidRepository
     case invalidResponse
-    case api(Int, String?)
+    case api(Int, String?, isAuthenticated: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -1034,7 +1070,10 @@ enum ClientError: LocalizedError {
             return "Repository must be in owner/repo format."
         case .invalidResponse:
             return "GitHub returned an unreadable response."
-        case .api(let statusCode, let message):
+        case .api(let statusCode, let message, let isAuthenticated):
+            if statusCode == 404 && !isAuthenticated {
+                return "GitHub returned 404. For private repos, set GITHUB_TOKEN/GH_TOKEN or run gh auth login."
+            }
             if let message {
                 return "GitHub returned \(statusCode): \(message)"
             }
@@ -1046,5 +1085,9 @@ enum ClientError: LocalizedError {
 extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
+    }
+
+    var nilIfBlank: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 }
