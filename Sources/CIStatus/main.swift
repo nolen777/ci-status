@@ -9,7 +9,7 @@ struct CIStatusApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(model: appDelegate.model)
+            EmptyView()
         }
     }
 }
@@ -156,12 +156,10 @@ final class StatusMenuController {
     private let model: ActionsStatusModel
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
-    private let settingsWindowController: SettingsWindowController
     private var cancellables: Set<AnyCancellable> = []
 
     init(model: ActionsStatusModel) {
         self.model = model
-        settingsWindowController = SettingsWindowController(model: model)
 
         menu.autoenablesItems = false
         statusItem.menu = menu
@@ -196,10 +194,7 @@ final class StatusMenuController {
 
         let trimmedRepository = model.repository.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedRepository.isEmpty {
-            addInfoRow(title: "No repository configured", subtitle: "Choose a repo to watch", icon: .settings)
-            addActionRow(title: "Set Repository", icon: .settings) { [weak self] in
-                self?.showSettings()
-            }
+            addInfoRow(title: "No repository configured", subtitle: "Set GITHUB_REPOSITORY or saved repository defaults", icon: .empty)
             addSeparator()
         } else {
             addInfoRow(title: trimmedRepository, subtitle: nil, icon: .repository)
@@ -225,9 +220,6 @@ final class StatusMenuController {
             }
 
             addSeparator()
-            addActionRow(title: "Settings", icon: .settings) { [weak self] in
-                self?.showSettings()
-            }
         }
 
         addActionRow(title: "Refresh", icon: .refresh) { [weak self] in
@@ -297,29 +289,6 @@ final class StatusMenuController {
 
     private func addSeparator() {
         menu.addItem(.separator())
-    }
-
-    private func showSettings() {
-        settingsWindowController.show()
-    }
-}
-
-@MainActor
-final class SettingsWindowController {
-    private let window: NSWindow
-
-    init(model: ActionsStatusModel) {
-        let hostingController = NSHostingController(rootView: SettingsView(model: model))
-        window = NSWindow(contentViewController: hostingController)
-        window.title = "CIStatus Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.isReleasedWhenClosed = false
-        window.center()
-    }
-
-    func show() {
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -424,34 +393,6 @@ struct MenuRowView: View {
 
     private var foregroundStyle: some ShapeStyle {
         isHovered ? AnyShapeStyle(Color.primary) : AnyShapeStyle(Color.primary)
-    }
-}
-
-struct SettingsView: View {
-    @ObservedObject var model: ActionsStatusModel
-
-    var body: some View {
-        Form {
-            TextField("Repository", text: $model.repository, prompt: Text("owner/repo"))
-                .onSubmit {
-                    Task { await model.refresh() }
-                }
-
-            Stepper(value: $model.refreshInterval, in: 15...600, step: 15) {
-                Text("Refresh every \(Int(model.refreshInterval)) seconds")
-            }
-
-            HStack {
-                Spacer()
-                Button("Refresh Now") {
-                    Task { await model.refresh() }
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .formStyle(.grouped)
-        .padding(20)
-        .frame(width: 420)
     }
 }
 
