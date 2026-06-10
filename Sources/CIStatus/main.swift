@@ -211,13 +211,7 @@ final class StatusMenuController {
 
             addSeparator()
 
-            if model.runs.isEmpty {
-                addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
-            } else {
-                for run in model.runs.prefix(5) {
-                    addRunRow(run)
-                }
-            }
+            addRunSections()
 
             addSeparator()
         }
@@ -251,31 +245,63 @@ final class StatusMenuController {
         }
     }
 
+    private func addRunSections() {
+        let sections = RunSections(runs: model.runs)
+
+        if sections.isEmpty {
+            addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
+            return
+        }
+
+        addSection(title: "Needs Attention", runs: sections.unresolvedFailures, emptyTitle: "No unresolved failures")
+        addSeparator()
+        addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs")
+        addSeparator()
+        addSection(title: "Recently Passed", runs: sections.recentPasses, emptyTitle: "No recent passes")
+    }
+
+    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String) {
+        addHeaderRow(title)
+
+        if runs.isEmpty {
+            addInfoRow(title: emptyTitle, subtitle: nil, icon: .empty)
+        } else {
+            for run in runs {
+                addRunRow(run)
+            }
+        }
+    }
+
     private func addRunRow(_ run: WorkflowRun) {
         addActionRow(title: run.displayTitle, subtitle: run.detail, icon: .status(run.statusKind)) { [weak self] in
             self?.model.openRun(run)
         }
     }
 
+    private func addHeaderRow(_ title: String) {
+        addCustomItem(title: title.uppercased(), subtitle: nil, icon: .none, isEnabled: false, rowKind: .header, action: nil)
+    }
+
     private func addInfoRow(title: String, subtitle: String?, icon: MenuIcon) {
-        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: false, action: nil)
+        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: false, rowKind: .standard, action: nil)
     }
 
     private func addActionRow(title: String, subtitle: String? = nil, icon: MenuIcon, isEnabled: Bool = true, action: @escaping () -> Void) {
-        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: isEnabled, action: action)
+        addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: isEnabled, rowKind: .standard, action: action)
     }
 
-    private func addCustomItem(title: String, subtitle: String?, icon: MenuIcon, isEnabled: Bool, action: (() -> Void)?) {
+    private func addCustomItem(title: String, subtitle: String?, icon: MenuIcon, isEnabled: Bool, rowKind: MenuRowKind, action: (() -> Void)?) {
         let item = NSMenuItem()
         item.isEnabled = isEnabled
 
-        let height: CGFloat = subtitle == nil ? 34 : 48
+        let height: CGFloat = rowKind == .header ? 24 : (subtitle == nil ? 34 : 48)
         let row = MenuRowView(
             title: title,
             subtitle: subtitle,
             icon: icon,
             isEnabled: isEnabled,
             isInteractive: action != nil,
+            rowKind: rowKind,
             action: { [weak self] in
                 self?.menu.cancelTracking()
                 action?()
@@ -301,6 +327,12 @@ enum MenuIcon {
     case refresh
     case power
     case empty
+    case none
+}
+
+enum MenuRowKind {
+    case standard
+    case header
 }
 
 struct MenuRowView: View {
@@ -309,20 +341,23 @@ struct MenuRowView: View {
     let icon: MenuIcon
     let isEnabled: Bool
     let isInteractive: Bool
+    let rowKind: MenuRowKind
     let action: () -> Void
 
     @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 10) {
-            iconView
-                .frame(width: 22, height: 22)
+            if rowKind == .standard {
+                iconView
+                    .frame(width: 22, height: 22)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 14, weight: subtitle == nil ? .regular : .medium))
+                    .font(titleFont)
                     .lineLimit(1)
-                    .foregroundStyle(foregroundStyle)
+                    .foregroundStyle(titleForegroundStyle)
 
                 if let subtitle {
                     Text(subtitle)
@@ -335,11 +370,11 @@ struct MenuRowView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, subtitle == nil ? 7 : 6)
+        .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
         .contentShape(Rectangle())
-        .opacity(isEnabled ? 1 : 0.5)
+        .opacity(rowKind == .header || isEnabled ? 1 : 0.5)
         .onHover { hovering in
             isHovered = hovering && isEnabled && isInteractive
         }
@@ -384,6 +419,35 @@ struct MenuRowView: View {
         case .empty:
             Circle()
                 .stroke(.secondary.opacity(0.5), lineWidth: 1.5)
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private var titleFont: Font {
+        switch rowKind {
+        case .standard:
+            return .system(size: 14, weight: subtitle == nil ? .regular : .medium)
+        case .header:
+            return .system(size: 10, weight: .semibold)
+        }
+    }
+
+    private var titleForegroundStyle: some ShapeStyle {
+        switch rowKind {
+        case .standard:
+            return AnyShapeStyle(Color.primary)
+        case .header:
+            return AnyShapeStyle(Color.secondary)
+        }
+    }
+
+    private var verticalPadding: CGFloat {
+        switch rowKind {
+        case .standard:
+            return subtitle == nil ? 7 : 6
+        case .header:
+            return 5
         }
     }
 
@@ -398,7 +462,7 @@ struct MenuRowView: View {
 
 struct GitHubActionsClient {
     func fetchRuns(repository: String) async throws -> [WorkflowRun] {
-        guard let url = URL(string: "https://api.github.com/repos/\(repository)/actions/runs?per_page=10") else {
+        guard let url = URL(string: "https://api.github.com/repos/\(repository)/actions/runs?per_page=50") else {
             throw ClientError.invalidRepository
         }
 
@@ -537,6 +601,54 @@ struct WorkflowRun: Decodable, Identifiable {
 
     var displayTitle: String {
         "\(name) - \(branch)"
+    }
+
+    var workflowBranchKey: String {
+        "\(name)\u{1F}\(branch)"
+    }
+}
+
+struct RunSections {
+    let unresolvedFailures: [WorkflowRun]
+    let activeRuns: [WorkflowRun]
+    let recentPasses: [WorkflowRun]
+
+    var isEmpty: Bool {
+        unresolvedFailures.isEmpty && activeRuns.isEmpty && recentPasses.isEmpty
+    }
+
+    init(runs: [WorkflowRun]) {
+        let newestFirst = runs.sorted { $0.createdAt > $1.createdAt }
+        var newerPassedKeys = Set<String>()
+        var includedFailureKeys = Set<String>()
+        var includedPassKeys = Set<String>()
+        var unresolvedFailures: [WorkflowRun] = []
+        var activeRuns: [WorkflowRun] = []
+        var recentPasses: [WorkflowRun] = []
+
+        for run in newestFirst {
+            switch run.statusKind {
+            case .success:
+                if includedPassKeys.insert(run.workflowBranchKey).inserted {
+                    recentPasses.append(run)
+                }
+                newerPassedKeys.insert(run.workflowBranchKey)
+            case .failure:
+                guard !newerPassedKeys.contains(run.workflowBranchKey),
+                      includedFailureKeys.insert(run.workflowBranchKey).inserted else {
+                    continue
+                }
+                unresolvedFailures.append(run)
+            case .running, .queued:
+                activeRuns.append(run)
+            case .cancelled:
+                continue
+            }
+        }
+
+        self.unresolvedFailures = Array(unresolvedFailures.prefix(5))
+        self.activeRuns = activeRuns
+        self.recentPasses = Array(recentPasses.prefix(5))
     }
 }
 
