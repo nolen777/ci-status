@@ -8,15 +8,15 @@ struct CIStatusApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            StatusPanel(model: model)
-                .frame(width: 360)
-                .task {
-                    await model.refresh()
-                }
+            ActionsMenu(model: model)
         } label: {
             Label(model.menuTitle, systemImage: model.menuIcon)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
+
+        Settings {
+            SettingsView(model: model)
+        }
     }
 }
 
@@ -35,13 +35,13 @@ final class ActionsStatusModel: ObservableObject {
     var menuTitle: String {
         switch state {
         case .loading:
-            return "CI ..."
+            return "🔵 CI ..."
         case .failed:
-            return "CI ?"
+            return "🔴 CI ?"
         case .idle where runs.isEmpty:
             return "CI"
         default:
-            return latestRun?.compactStatus ?? "CI"
+            return latestRun?.compactStatusTitle ?? "CI"
         }
     }
 
@@ -109,6 +109,10 @@ final class ActionsStatusModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openRun(_ run: WorkflowRun) {
+        NSWorkspace.shared.open(run.htmlURL)
+    }
+
     func openRepositoryActions() {
         let trimmedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedRepository.isEmpty,
@@ -130,154 +134,109 @@ enum LoadState: Equatable {
     case failed(String)
 }
 
-struct StatusPanel: View {
+struct ActionsMenu: View {
     @ObservedObject var model: ActionsStatusModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            repositoryField
+        let trimmedRepository = model.repository.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedRepository.isEmpty {
+            Text("No repository configured")
+            SettingsLink {
+                Text("⚙️ Set Repository...")
+            }
             Divider()
-            content
+        } else {
+            Text(trimmedRepository)
+            statusSummary
+
             Divider()
-            footer
-        }
-        .padding(16)
-    }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: model.menuIcon)
-                .font(.title2)
-                .foregroundStyle(statusColor)
-                .frame(width: 26)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.latestRun?.name ?? "GitHub Actions")
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            Button {
-                Task { await model.refresh() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .help("Refresh")
-        }
-    }
-
-    private var repositoryField: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Repository")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextField("owner/repo", text: $model.repository)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit {
-                    Task { await model.refresh() }
-                }
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch model.state {
-        case .idle where model.repository.isEmpty:
-            ContentUnavailableView("Choose a repository", systemImage: "tray", description: Text("Use owner/repo, like apple/swift."))
-                .frame(height: 140)
-        case .loading where model.runs.isEmpty:
-            ProgressView("Loading runs...")
-                .frame(maxWidth: .infinity, minHeight: 140)
-        case .failed(let message):
-            ContentUnavailableView("Could not load Actions", systemImage: "exclamationmark.triangle", description: Text(message))
-                .frame(height: 140)
-        default:
-            VStack(spacing: 8) {
-                ForEach(model.runs.prefix(5)) { run in
-                    RunRow(run: run)
-                }
-            }
-        }
-    }
-
-    private var footer: some View {
-        HStack {
-            Button("Open Actions") {
+            Button("↗ Open Actions") {
                 model.openRepositoryActions()
             }
-            .disabled(model.repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Button("Open Latest") {
+            Button("⚡ Open Latest Run") {
                 model.openLatestRun()
             }
             .disabled(model.latestRun == nil)
 
-            Spacer()
+            Divider()
 
-            Button("Quit") {
-                model.quit()
+            if model.runs.isEmpty {
+                Text("No workflow runs")
+            } else {
+                ForEach(model.runs.prefix(5)) { run in
+                    Button(run.menuTitle) {
+                        model.openRun(run)
+                    }
+                }
+            }
+
+            Divider()
+            SettingsLink {
+                Text("⚙️ Settings...")
             }
         }
-        .buttonStyle(.borderless)
-    }
 
-    private var subtitle: String {
-        if let lastUpdated = model.lastUpdated {
-            return "Updated \(lastUpdated.formatted(date: .omitted, time: .shortened))"
+        Button("↻ Refresh") {
+            Task { await model.refresh() }
         }
+        .keyboardShortcut("r")
 
-        return "Waiting for status"
+        Divider()
+
+        Button("⏻ Quit CIStatus") {
+            model.quit()
+        }
+        .keyboardShortcut("q")
     }
 
-    private var statusColor: Color {
-        switch model.latestRun?.statusKind {
-        case .success:
-            return .green
-        case .failure:
-            return .red
-        case .running:
-            return .blue
-        case .queued:
-            return .orange
-        case .cancelled:
-            return .secondary
-        case .none:
-            return .secondary
+    @ViewBuilder
+    private var statusSummary: some View {
+        switch model.state {
+        case .loading where model.runs.isEmpty:
+            Text("🔵 Loading...")
+        case .failed(let message):
+            Text("🔴 Error: \(message)")
+        default:
+            if let latestRun = model.latestRun {
+                Text(latestRun.menuTitle)
+                if let lastUpdated = model.lastUpdated {
+                    Text("Updated \(lastUpdated.formatted(date: .omitted, time: .shortened))")
+                }
+            } else {
+                Text("Waiting for status")
+            }
         }
     }
 }
 
-struct RunRow: View {
-    let run: WorkflowRun
+struct SettingsView: View {
+    @ObservedObject var model: ActionsStatusModel
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: run.statusKind.iconName)
-                .foregroundStyle(run.statusKind.color)
-                .frame(width: 20)
+        Form {
+            TextField("Repository", text: $model.repository, prompt: Text("owner/repo"))
+                .onSubmit {
+                    Task { await model.refresh() }
+                }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(run.name)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                Text(run.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            Stepper(value: $model.refreshInterval, in: 15...600, step: 15) {
+                Text("Refresh every \(Int(model.refreshInterval)) seconds")
             }
 
-            Spacer()
+            HStack {
+                Spacer()
+                Button("Refresh Now") {
+                    Task { await model.refresh() }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
         }
-        .padding(.vertical, 4)
+        .formStyle(.grouped)
+        .padding(20)
+        .frame(width: 420)
     }
 }
 
@@ -407,9 +366,17 @@ struct WorkflowRun: Decodable, Identifiable {
         }
     }
 
+    var compactStatusTitle: String {
+        "\(statusKind.symbol) \(compactStatus)"
+    }
+
     var detail: String {
         let statusText = conclusion ?? status
         return "\(branch) - \(event) - \(statusText)"
+    }
+
+    var menuTitle: String {
+        "\(statusKind.symbol) \(name) - \(branch)"
     }
 }
 
@@ -447,6 +414,21 @@ enum StatusKind {
             return .orange
         case .cancelled:
             return .secondary
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .success:
+            return "🟢"
+        case .failure:
+            return "🔴"
+        case .running:
+            return "🔵"
+        case .queued:
+            return "🟠"
+        case .cancelled:
+            return "⚪"
         }
     }
 }
