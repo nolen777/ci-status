@@ -97,10 +97,6 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     var menuStatusKind: StatusKind {
-        if runs.contains(where: { $0.statusKind == .running || $0.statusKind == .queued }) {
-            return .running
-        }
-
         let mainRuns = runs
             .filter { $0.branch == "main" }
             .sorted { $0.createdAt > $1.createdAt }
@@ -122,6 +118,10 @@ final class ActionsStatusModel: ObservableObject {
             case .cancelled:
                 continue
             }
+        }
+
+        if runs.contains(where: { $0.statusKind == .running || $0.statusKind == .queued }) {
+            return .running
         }
 
         return .success
