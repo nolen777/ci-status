@@ -260,6 +260,8 @@ final class StatusMenuController: NSObject {
     private let model: ActionsStatusModel
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private var statusAnimationTimer: Timer?
+    private var statusAnimationPhase: CGFloat = 0
     private var cancellables: Set<AnyCancellable> = []
 
     init(model: ActionsStatusModel) {
@@ -271,6 +273,8 @@ final class StatusMenuController: NSObject {
 
         if let button = statusItem.button {
             button.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
         }
 
         bindModel()
@@ -294,7 +298,7 @@ final class StatusMenuController: NSObject {
     }
 
     private func rebuild() {
-        statusItem.button?.title = model.menuTitle
+        updateStatusItem()
 
         menu.removeAllItems()
 
@@ -319,6 +323,68 @@ final class StatusMenuController: NSObject {
 
         addActionRow(title: "Quit CIStatus", icon: .power) { [weak self] in
             self?.model.quit()
+        }
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem.button else {
+            return
+        }
+
+        let statusKind = statusKindForStatusItem
+        button.title = titleForStatusItem(statusKind: statusKind)
+        button.image = StatusBarBadgeRenderer.image(for: statusKind, phase: statusAnimationPhase)
+        updateStatusAnimationTimer(for: statusKind)
+    }
+
+    private var statusKindForStatusItem: StatusKind {
+        switch model.state {
+        case .loading:
+            return .running
+        case .failed:
+            return .failure
+        case .idle where model.runs.isEmpty:
+            return .cancelled
+        case .idle, .loaded:
+            return model.menuStatusKind
+        }
+    }
+
+    private func titleForStatusItem(statusKind: StatusKind) -> String {
+        switch model.state {
+        case .loading:
+            return "CI ..."
+        case .failed:
+            return "CI ?"
+        case .idle where model.runs.isEmpty:
+            return "CI"
+        case .idle, .loaded:
+            return statusKind.compactStatus
+        }
+    }
+
+    private func updateStatusAnimationTimer(for statusKind: StatusKind) {
+        if statusKind.isAnimated {
+            guard statusAnimationTimer == nil else {
+                return
+            }
+
+            let timer = Timer(timeInterval: 1 / 30, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.statusAnimationPhase = (self.statusAnimationPhase + (1 / 30)).truncatingRemainder(dividingBy: 1)
+                    self.statusItem.button?.image = StatusBarBadgeRenderer.image(
+                        for: self.statusKindForStatusItem,
+                        phase: self.statusAnimationPhase
+                    )
+                }
+            }
+            statusAnimationTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        } else {
+            statusAnimationTimer?.invalidate()
+            statusAnimationTimer = nil
+            statusAnimationPhase = 0
         }
     }
 
@@ -621,6 +687,82 @@ struct StatusBadgeView: View {
             isAnimating = true
         }
         .animation(statusKind.animation, value: isAnimating)
+    }
+}
+
+enum StatusBarBadgeRenderer {
+    static func image(for statusKind: StatusKind, phase: CGFloat) -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.isTemplate = false
+
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        let bounds = NSRect(origin: .zero, size: size)
+        let badgeRect = bounds.insetBy(dx: 2, dy: 2)
+
+        if statusKind.isAnimated {
+            let pulseProgress = statusKind == .running ? phase : abs(sin(phase * .pi))
+            let pulseScale = 1 + (0.28 * pulseProgress)
+            let pulseSize = badgeRect.size.width * pulseScale
+            let pulseRect = NSRect(
+                x: bounds.midX - pulseSize / 2,
+                y: bounds.midY - pulseSize / 2,
+                width: pulseSize,
+                height: pulseSize
+            )
+            let pulse = NSBezierPath(ovalIn: pulseRect)
+            statusKind.nsColor.withAlphaComponent(0.28 * (1 - pulseProgress)).setStroke()
+            pulse.lineWidth = 1.5
+            pulse.stroke()
+        }
+
+        let badge = NSBezierPath(ovalIn: badgeRect)
+        statusKind.nsColor.setFill()
+        badge.fill()
+
+        NSColor.white.withAlphaComponent(0.65).setStroke()
+        badge.lineWidth = 1
+        badge.stroke()
+
+        drawSymbol(for: statusKind, in: bounds, phase: phase)
+
+        return image
+    }
+
+    private static func drawSymbol(for statusKind: StatusKind, in bounds: NSRect, phase: CGFloat) {
+        guard let symbol = NSImage(systemSymbolName: statusKind.badgeSymbolName, accessibilityDescription: nil) else {
+            return
+        }
+
+        let configuration = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        let configuredSymbol = symbol.withSymbolConfiguration(configuration) ?? symbol
+        guard let symbolCopy = configuredSymbol.copy() as? NSImage else {
+            return
+        }
+        symbolCopy.isTemplate = true
+
+        let symbolRect = NSRect(
+            x: bounds.midX - 5,
+            y: bounds.midY - 5,
+            width: 10,
+            height: 10
+        )
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+
+        if statusKind == .running {
+            let transform = NSAffineTransform()
+            transform.translateX(by: bounds.midX, yBy: bounds.midY)
+            transform.rotate(byDegrees: 360 * phase)
+            transform.translateX(by: -bounds.midX, yBy: -bounds.midY)
+            transform.concat()
+        }
+
+        NSColor.white.set()
+        symbolCopy.draw(in: symbolRect, from: .zero, operation: .sourceOver, fraction: 1)
     }
 }
 
@@ -1044,6 +1186,21 @@ enum StatusKind {
             return .orange
         case .cancelled:
             return .secondary
+        }
+    }
+
+    var nsColor: NSColor {
+        switch self {
+        case .success:
+            return .systemGreen
+        case .failure:
+            return .systemRed
+        case .running:
+            return .systemBlue
+        case .queued:
+            return .systemOrange
+        case .cancelled:
+            return .systemGray
         }
     }
 
