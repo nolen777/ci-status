@@ -332,7 +332,7 @@ final class StatusMenuController: NSObject {
         }
 
         let statusKind = statusKindForStatusItem
-        button.title = titleForStatusItem(statusKind: statusKind)
+        button.title = ""
         button.image = StatusBarBadgeRenderer.image(for: statusKind, phase: statusAnimationPhase)
         updateStatusAnimationTimer(for: statusKind)
     }
@@ -347,19 +347,6 @@ final class StatusMenuController: NSObject {
             return .cancelled
         case .idle, .loaded:
             return model.menuStatusKind
-        }
-    }
-
-    private func titleForStatusItem(statusKind: StatusKind) -> String {
-        switch model.state {
-        case .loading:
-            return "CI ..."
-        case .failed:
-            return "CI ?"
-        case .idle where model.runs.isEmpty:
-            return "CI"
-        case .idle, .loaded:
-            return statusKind.compactStatus
         }
     }
 
