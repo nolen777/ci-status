@@ -679,7 +679,7 @@ struct StatusBadgeView: View {
 
 enum StatusBarBadgeRenderer {
     static func image(for statusKind: StatusKind, phase: CGFloat) -> NSImage {
-        let size = NSSize(width: 18, height: 18)
+        let size = NSSize(width: 22, height: 22)
         let image = NSImage(size: size)
         image.isTemplate = false
 
@@ -687,7 +687,7 @@ enum StatusBarBadgeRenderer {
         defer { image.unlockFocus() }
 
         let bounds = NSRect(origin: .zero, size: size)
-        let badgeRect = bounds.insetBy(dx: 2, dy: 2)
+        let badgeRect = bounds.insetBy(dx: 2.5, dy: 2.5)
 
         if statusKind.isAnimated {
             let pulseProgress = statusKind == .running ? phase : abs(sin(phase * .pi))
@@ -723,7 +723,7 @@ enum StatusBarBadgeRenderer {
             return
         }
 
-        let configuration = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        let configuration = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
         let configuredSymbol = symbol.withSymbolConfiguration(configuration) ?? symbol
         guard let symbolCopy = configuredSymbol.copy() as? NSImage else {
             return
@@ -731,10 +731,10 @@ enum StatusBarBadgeRenderer {
         symbolCopy.isTemplate = true
 
         let symbolRect = NSRect(
-            x: bounds.midX - 5,
-            y: bounds.midY - 5,
-            width: 10,
-            height: 10
+            x: bounds.midX - 6,
+            y: bounds.midY - 6,
+            width: 12,
+            height: 12
         )
 
         NSGraphicsContext.saveGraphicsState()
