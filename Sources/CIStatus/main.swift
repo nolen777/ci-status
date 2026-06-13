@@ -538,16 +538,7 @@ struct MenuRowView: View {
     private var iconView: some View {
         switch icon {
         case .status(let statusKind):
-            ZStack {
-                Circle()
-                    .fill(statusKind.color)
-                    .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
-                    .shadow(color: statusKind.color.opacity(0.45), radius: 1.5, y: 1)
-
-                Image(systemName: statusKind.badgeSymbolName)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-            }
+            StatusBadgeView(statusKind: statusKind)
         case .repository:
             Image(systemName: "tray.full")
                 .foregroundStyle(.secondary)
@@ -598,6 +589,38 @@ struct MenuRowView: View {
 
     private var foregroundStyle: some ShapeStyle {
         isHovered ? AnyShapeStyle(Color.primary) : AnyShapeStyle(Color.primary)
+    }
+}
+
+struct StatusBadgeView: View {
+    let statusKind: StatusKind
+
+    @State private var isAnimating = false
+
+    var body: some View {
+        ZStack {
+            if statusKind.isAnimated {
+                Circle()
+                    .stroke(statusKind.color.opacity(isAnimating ? 0 : 0.45), lineWidth: 2)
+                    .scaleEffect(isAnimating ? 1.45 : 1)
+            }
+
+            Circle()
+                .fill(statusKind.color)
+                .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
+                .shadow(color: statusKind.color.opacity(0.45), radius: 1.5, y: 1)
+
+            Image(systemName: statusKind.badgeSymbolName)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .rotationEffect(statusKind == .running ? .degrees(isAnimating ? 360 : 0) : .zero)
+                .scaleEffect(statusKind == .queued ? (isAnimating ? 1.08 : 0.94) : 1)
+        }
+        .onAppear {
+            guard statusKind.isAnimated else { return }
+            isAnimating = true
+        }
+        .animation(statusKind.animation, value: isAnimating)
     }
 }
 
@@ -1051,6 +1074,21 @@ enum StatusKind {
             return "clock.fill"
         case .cancelled:
             return "slash"
+        }
+    }
+
+    var isAnimated: Bool {
+        self == .running || self == .queued
+    }
+
+    var animation: Animation? {
+        switch self {
+        case .running:
+            return .linear(duration: 1.1).repeatForever(autoreverses: false)
+        case .queued:
+            return .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+        case .success, .failure, .cancelled:
+            return nil
         }
     }
 }
