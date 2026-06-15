@@ -427,7 +427,7 @@ final class StatusMenuController: NSObject {
         }
 
         addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs") { run in
-            sections.activeRunDetail(for: run)
+            .run(run, detail: sections.activeRunDetail(for: run))
         }
         addSeparator()
         addSection(title: "Recently Passed", runs: sections.recentPasses, emptyTitle: "No recent passes")
@@ -436,19 +436,19 @@ final class StatusMenuController: NSObject {
     private func addEmptyRunsRow() {
         switch model.state {
         case .loading:
-            addInfoRow(title: "Loading...", subtitle: nil, icon: .status(.running))
+            addInfoRow(title: "Loading...", subtitle: nil as MenuSubtitle?, icon: .status(.running))
         case .failed(let message):
             addInfoRow(title: "Could not load Actions", subtitle: message, icon: .status(.failure))
         default:
-            addInfoRow(title: "No workflow runs", subtitle: nil, icon: .empty)
+            addInfoRow(title: "No workflow runs", subtitle: nil as MenuSubtitle?, icon: .empty)
         }
     }
 
-    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> String? = { $0.detail }) {
+    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> MenuSubtitle? = { .run($0, detail: $0.detail) }) {
         addHeaderRow(title)
 
         if runs.isEmpty {
-            addInfoRow(title: emptyTitle, subtitle: nil, icon: .empty)
+            addInfoRow(title: emptyTitle, subtitle: nil as MenuSubtitle?, icon: .empty)
         } else {
             for run in runs {
                 addRunRow(run, detail: detail(run))
@@ -456,7 +456,7 @@ final class StatusMenuController: NSObject {
         }
     }
 
-    private func addRunRow(_ run: WorkflowRun, detail: String?) {
+    private func addRunRow(_ run: WorkflowRun, detail: MenuSubtitle?) {
         addActionRow(title: run.displayTitle, subtitle: detail, icon: .status(run.statusKind)) { [weak self] in
             self?.model.openRun(run)
         }
@@ -467,14 +467,18 @@ final class StatusMenuController: NSObject {
     }
 
     private func addInfoRow(title: String, subtitle: String?, icon: MenuIcon) {
+        addInfoRow(title: title, subtitle: subtitle.map(MenuSubtitle.text), icon: icon)
+    }
+
+    private func addInfoRow(title: String, subtitle: MenuSubtitle?, icon: MenuIcon) {
         addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: false, rowKind: .standard, action: nil)
     }
 
-    private func addActionRow(title: String, subtitle: String? = nil, icon: MenuIcon, isEnabled: Bool = true, action: @escaping () -> Void) {
+    private func addActionRow(title: String, subtitle: MenuSubtitle? = nil, icon: MenuIcon, isEnabled: Bool = true, action: @escaping () -> Void) {
         addCustomItem(title: title, subtitle: subtitle, icon: icon, isEnabled: isEnabled, rowKind: .standard, action: action)
     }
 
-    private func addCustomItem(title: String, subtitle: String?, icon: MenuIcon, isEnabled: Bool, rowKind: MenuRowKind, action: (() -> Void)?) {
+    private func addCustomItem(title: String, subtitle: MenuSubtitle?, icon: MenuIcon, isEnabled: Bool, rowKind: MenuRowKind, action: (() -> Void)?) {
         let item = NSMenuItem()
         item.isEnabled = isEnabled
 
@@ -530,9 +534,41 @@ enum MenuRowKind {
     case header
 }
 
+enum MenuSubtitle {
+    case text(String)
+    case run(WorkflowRun, detail: String)
+
+    var detailText: String {
+        switch self {
+        case .text(let text):
+            return text
+        case .run(_, let detail):
+            return detail
+        }
+    }
+
+    var updatesEverySecond: Bool {
+        switch self {
+        case .text:
+            return false
+        case .run(let run, _):
+            return run.statusKind == .running || run.statusKind == .queued
+        }
+    }
+
+    func durationText(at date: Date) -> String? {
+        switch self {
+        case .text:
+            return nil
+        case .run(let run, _):
+            return run.durationText(at: date)
+        }
+    }
+}
+
 struct MenuRowView: View {
     let title: String
-    let subtitle: String?
+    let subtitle: MenuSubtitle?
     let icon: MenuIcon
     let isEnabled: Bool
     let isInteractive: Bool
@@ -555,12 +591,10 @@ struct MenuRowView: View {
                     .foregroundStyle(titleForegroundStyle)
 
                 if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                        .foregroundStyle(.secondary)
+                    subtitleView(subtitle)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
         }
@@ -577,6 +611,46 @@ struct MenuRowView: View {
             guard isEnabled, isInteractive else { return }
             action()
         }
+    }
+
+    @ViewBuilder
+    private func subtitleView(_ subtitle: MenuSubtitle) -> some View {
+        if subtitle.updatesEverySecond {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                subtitleContent(subtitle, at: context.date)
+            }
+        } else {
+            subtitleContent(subtitle, at: Date())
+        }
+    }
+
+    @ViewBuilder
+    private func subtitleContent(_ subtitle: MenuSubtitle, at date: Date) -> some View {
+        if let durationText = subtitle.durationText(at: date) {
+            HStack(spacing: 6) {
+                subtitleText(subtitle.detailText)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+
+                Text(durationText)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            subtitleText(subtitle.detailText)
+        }
+    }
+
+    private func subtitleText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(.secondary)
     }
 
     @ViewBuilder
@@ -1034,6 +1108,21 @@ struct WorkflowRun: Decodable, Identifiable {
     var workflowBranchKey: String {
         "\(sourceRepository)\u{1F}\(name)\u{1F}\(branch)"
     }
+
+    func durationText(at date: Date) -> String {
+        let endDate = statusKind == .running || statusKind == .queued ? date : updatedAt
+        let text = Self.durationFormatter.string(from: max(0, endDate.timeIntervalSince(createdAt))) ?? ""
+        return text.nilIfEmpty ?? "0s"
+    }
+
+    private static let durationFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 2
+        formatter.zeroFormattingBehavior = .dropAll
+        return formatter
+    }()
 }
 
 struct RunSections {
