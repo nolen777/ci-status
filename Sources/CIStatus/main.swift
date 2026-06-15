@@ -97,34 +97,20 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     var menuStatusKind: StatusKind {
-        let mainRuns = runs
-            .filter { $0.branch == "main" }
-            .sorted { $0.createdAt > $1.createdAt }
-        var activeKeys = Set<String>()
-        var resolvedKeys = Set<String>()
-
-        for run in mainRuns {
-            switch run.statusKind {
-            case .running, .queued:
-                activeKeys.insert(run.workflowBranchKey)
-            case .success:
-                resolvedKeys.insert(run.workflowBranchKey)
-            case .failure:
-                guard !activeKeys.contains(run.workflowBranchKey),
-                      !resolvedKeys.contains(run.workflowBranchKey) else {
-                    continue
-                }
-                return .failure
-            case .cancelled:
-                continue
-            }
+        let sections = RunSections(runs: runs)
+        if !sections.unresolvedFailures.isEmpty {
+            return .failure
         }
 
-        if runs.contains(where: { $0.statusKind == .running || $0.statusKind == .queued }) {
+        if !sections.activeRuns.isEmpty {
             return .running
         }
 
         return .success
+    }
+
+    var mainStatus: BranchStatus {
+        BranchStatus(branch: "main", runs: runs)
     }
 
     init() {
@@ -308,6 +294,8 @@ final class StatusMenuController: NSObject {
             addInfoRow(title: "No repositories selected", subtitle: "Choose at least one repository", icon: .empty)
             addSeparator()
         } else {
+            addBranchStatusRow(model.mainStatus)
+            addSeparator()
             addRunSections()
 
             addSeparator()
@@ -324,6 +312,10 @@ final class StatusMenuController: NSObject {
         addActionRow(title: "Quit CIStatus", icon: .power) { [weak self] in
             self?.model.quit()
         }
+    }
+
+    private func addBranchStatusRow(_ branchStatus: BranchStatus) {
+        addInfoRow(title: branchStatus.title, subtitle: branchStatus.subtitle, icon: .status(branchStatus.statusKind))
     }
 
     private func updateStatusItem() {
@@ -1117,6 +1109,90 @@ struct RunSections {
         case .running, .queued:
             return run.detail
         }
+    }
+}
+
+struct BranchStatus {
+    let branch: String
+    let statusKind: StatusKind
+    let unresolvedFailureCount: Int
+    let activeRunCount: Int
+    let recentPassCount: Int
+
+    var title: String {
+        branch
+    }
+
+    var subtitle: String {
+        switch statusKind {
+        case .failure:
+            return countLabel(unresolvedFailureCount, singular: "unresolved failure", plural: "unresolved failures")
+        case .running:
+            return countLabel(activeRunCount, singular: "active run", plural: "active runs")
+        case .queued:
+            return countLabel(activeRunCount, singular: "queued run", plural: "queued runs")
+        case .success:
+            return recentPassCount == 0 ? "No recent passing runs" : "Passing"
+        case .cancelled:
+            return "No recent runs"
+        }
+    }
+
+    init(branch: String, runs: [WorkflowRun]) {
+        self.branch = branch
+
+        let branchRuns = runs
+            .filter { $0.branch == branch }
+            .sorted { $0.createdAt > $1.createdAt }
+
+        var activeKeys = Set<String>()
+        var resolvedKeys = Set<String>()
+        var unresolvedFailureKeys = Set<String>()
+        var passKeys = Set<String>()
+        var activeRunCount = 0
+        var hasRunningRun = false
+
+        for run in branchRuns where run.statusKind == .running || run.statusKind == .queued {
+            activeKeys.insert(run.workflowBranchKey)
+            activeRunCount += 1
+            hasRunningRun = hasRunningRun || run.statusKind == .running
+        }
+
+        for run in branchRuns {
+            switch run.statusKind {
+            case .success:
+                resolvedKeys.insert(run.workflowBranchKey)
+                passKeys.insert(run.workflowBranchKey)
+            case .failure:
+                guard !activeKeys.contains(run.workflowBranchKey),
+                      !resolvedKeys.contains(run.workflowBranchKey) else {
+                    continue
+                }
+                unresolvedFailureKeys.insert(run.workflowBranchKey)
+            case .running, .queued, .cancelled:
+                continue
+            }
+        }
+
+        unresolvedFailureCount = unresolvedFailureKeys.count
+        self.activeRunCount = activeRunCount
+        recentPassCount = passKeys.count
+
+        if unresolvedFailureCount > 0 {
+            statusKind = .failure
+        } else if hasRunningRun {
+            statusKind = .running
+        } else if activeRunCount > 0 {
+            statusKind = .queued
+        } else if recentPassCount > 0 {
+            statusKind = .success
+        } else {
+            statusKind = .cancelled
+        }
+    }
+
+    private func countLabel(_ count: Int, singular: String, plural: String) -> String {
+        "\(count) \(count == 1 ? singular : plural)"
     }
 }
 
