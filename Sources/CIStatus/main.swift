@@ -1286,7 +1286,8 @@ struct RunSections {
     }
 
     init(runs: [WorkflowRun]) {
-        let newestFirst = runs.sorted { $0.createdAt > $1.createdAt }
+        let newestStartedFirst = runs.sorted { $0.createdAt > $1.createdAt }
+        let newestCompletedFirst = runs.sorted { $0.updatedAt > $1.updatedAt }
         var newerPassedKeys = Set<String>()
         var includedFailureKeys = Set<String>()
         var includedPassKeys = Set<String>()
@@ -1296,9 +1297,9 @@ struct RunSections {
         var activeRuns: [WorkflowRun] = []
         var recentPasses: [WorkflowRun] = []
 
-        for (index, run) in newestFirst.enumerated() where run.statusKind == .running || run.statusKind == .queued {
+        for run in newestStartedFirst where run.statusKind == .running || run.statusKind == .queued {
             activeKeys.insert(run.workflowBranchKey)
-            priorCompletedByActiveRunID[run.id] = newestFirst[(index + 1)...]
+            priorCompletedByActiveRunID[run.id] = newestCompletedFirst
                 .first { candidate in
                     candidate.workflowBranchKey == run.workflowBranchKey &&
                         candidate.statusKind != .running &&
@@ -1306,7 +1307,7 @@ struct RunSections {
                 }
         }
 
-        for run in newestFirst {
+        for run in newestCompletedFirst {
             switch run.statusKind {
             case .success:
                 if includedPassKeys.insert(run.workflowBranchKey).inserted {
@@ -1321,11 +1322,13 @@ struct RunSections {
                 }
                 unresolvedFailures.append(run)
             case .running, .queued:
-                activeRuns.append(run)
+                continue
             case .cancelled:
                 continue
             }
         }
+
+        activeRuns = newestStartedFirst.filter { $0.statusKind == .running || $0.statusKind == .queued }
 
         self.unresolvedFailures = Array(unresolvedFailures.prefix(5))
         self.activeRuns = activeRuns
