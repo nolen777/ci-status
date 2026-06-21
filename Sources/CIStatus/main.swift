@@ -47,6 +47,7 @@ final class ActionsStatusModel: ObservableObject {
     }
 
     @Published private(set) var runs: [WorkflowRun] = []
+    @Published private(set) var runnerSummaries: [Int: RunnerSummary] = [:]
     @Published private(set) var state: LoadState = .idle
     @Published private(set) var lastUpdated: Date?
 
@@ -144,6 +145,7 @@ final class ActionsStatusModel: ObservableObject {
         let repositories = Self.uniqueRepositories(selectedRepositories)
         guard !repositories.isEmpty else {
             runs = []
+            runnerSummaries = [:]
             state = .idle
             return
         }
@@ -158,12 +160,36 @@ final class ActionsStatusModel: ObservableObject {
                     return repositoryRun
                 }
             }
-            runs = fetchedRuns.sorted { $0.createdAt > $1.createdAt }
+            let sortedRuns = fetchedRuns.sorted { $0.createdAt > $1.createdAt }
+            runs = sortedRuns
+            runnerSummaries = [:]
             lastUpdated = Date()
             state = .loaded
+            await refreshRunnerSummaries(for: RunSections(runs: sortedRuns).activeRuns)
         } catch {
             state = .failed(error.localizedDescription)
         }
+    }
+
+    func runnerSummary(for run: WorkflowRun) -> RunnerSummary? {
+        runnerSummaries[run.id]
+    }
+
+    private func refreshRunnerSummaries(for activeRuns: [WorkflowRun]) async {
+        guard !activeRuns.isEmpty else {
+            runnerSummaries = [:]
+            return
+        }
+
+        var summaries: [Int: RunnerSummary] = [:]
+        for run in activeRuns.prefix(10) {
+            guard let jobs = try? await client.fetchJobs(repository: run.sourceRepository, runID: run.id) else {
+                continue
+            }
+            summaries[run.id] = RunnerSummary(jobs: jobs)
+        }
+
+        runnerSummaries = summaries
     }
 
     func openRun(_ run: WorkflowRun) {
@@ -273,6 +299,7 @@ final class StatusMenuController: NSObject {
             model.$selectedRepositories.map { _ in () }.eraseToAnyPublisher(),
             model.$refreshInterval.map { _ in () }.eraseToAnyPublisher(),
             model.$runs.map { _ in () }.eraseToAnyPublisher(),
+            model.$runnerSummaries.map { _ in () }.eraseToAnyPublisher(),
             model.$state.map { _ in () }.eraseToAnyPublisher(),
             model.$lastUpdated.map { _ in () }.eraseToAnyPublisher()
         ])
@@ -427,7 +454,7 @@ final class StatusMenuController: NSObject {
         }
 
         addSection(title: "Running or Waiting", runs: sections.activeRuns, emptyTitle: "No active runs") { run in
-            .run(run, detail: sections.activeRunDetail(for: run))
+            .run(run, detail: sections.activeRunDetail(for: run), runnerSummary: model.runnerSummary(for: run))
         }
         addSeparator()
         addSection(title: "Recently Passed", runs: sections.recentPasses, emptyTitle: "No recent passes")
@@ -444,7 +471,7 @@ final class StatusMenuController: NSObject {
         }
     }
 
-    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> MenuSubtitle? = { .run($0, detail: $0.detail) }) {
+    private func addSection(title: String, runs: [WorkflowRun], emptyTitle: String, detail: (WorkflowRun) -> MenuSubtitle? = { .run($0, detail: $0.detail, runnerSummary: nil) }) {
         addHeaderRow(title)
 
         if runs.isEmpty {
@@ -482,7 +509,12 @@ final class StatusMenuController: NSObject {
         let item = NSMenuItem()
         item.isEnabled = isEnabled
 
-        let height: CGFloat = rowKind == .header ? 24 : (subtitle == nil ? 34 : 48)
+        let height: CGFloat = switch rowKind {
+        case .header:
+            24
+        case .standard:
+            subtitle?.usesMetadataRow == true ? 62 : (subtitle == nil ? 34 : 48)
+        }
         let row = MenuRowView(
             title: title,
             subtitle: subtitle,
@@ -536,13 +568,13 @@ enum MenuRowKind {
 
 enum MenuSubtitle {
     case text(String)
-    case run(WorkflowRun, detail: String)
+    case run(WorkflowRun, detail: String, runnerSummary: RunnerSummary?)
 
     var detailText: String {
         switch self {
         case .text(let text):
             return text
-        case .run(_, let detail):
+        case .run(_, let detail, _):
             return detail
         }
     }
@@ -551,7 +583,7 @@ enum MenuSubtitle {
         switch self {
         case .text:
             return false
-        case .run(let run, _):
+        case .run(let run, _, _):
             return run.statusKind == .running || run.statusKind == .queued
         }
     }
@@ -560,9 +592,22 @@ enum MenuSubtitle {
         switch self {
         case .text:
             return nil
-        case .run(let run, _):
+        case .run(let run, _, _):
             return run.durationText(at: date)
         }
+    }
+
+    var runnerText: String? {
+        switch self {
+        case .text:
+            return nil
+        case .run(_, _, let runnerSummary):
+            return runnerSummary?.displayText.nilIfBlank
+        }
+    }
+
+    var usesMetadataRow: Bool {
+        updatesEverySecond
     }
 }
 
@@ -626,7 +671,28 @@ struct MenuRowView: View {
 
     @ViewBuilder
     private func subtitleContent(_ subtitle: MenuSubtitle, at date: Date) -> some View {
-        if let durationText = subtitle.durationText(at: date) {
+        if subtitle.usesMetadataRow {
+            VStack(alignment: .leading, spacing: 1) {
+                subtitleText(subtitle.detailText)
+
+                HStack(spacing: 6) {
+                    if let runnerText = subtitle.runnerText {
+                        subtitleMetadataText(runnerText)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+
+                    if let durationText = subtitle.durationText(at: date) {
+                        subtitleMetadataText(durationText)
+                            .monospacedDigit()
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else if let durationText = subtitle.durationText(at: date) {
             HStack(spacing: 6) {
                 subtitleText(subtitle.detailText)
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -648,6 +714,14 @@ struct MenuRowView: View {
     private func subtitleText(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 11))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(.secondary)
+    }
+
+    private func subtitleMetadataText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
             .lineLimit(1)
             .truncationMode(.tail)
             .foregroundStyle(.secondary)
@@ -930,6 +1004,26 @@ struct GitHubActionsClient {
             throw ClientError.invalidRepository
         }
 
+        let (data, _) = try await fetch(url: url)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(WorkflowRunsResponse.self, from: data).workflowRuns
+    }
+
+    func fetchJobs(repository: String, runID: Int) async throws -> [WorkflowJob] {
+        guard let url = URL(string: "https://api.github.com/repos/\(repository)/actions/runs/\(runID)/jobs?per_page=100") else {
+            throw ClientError.invalidRepository
+        }
+
+        let (data, _) = try await fetch(url: url)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(WorkflowJobsResponse.self, from: data).jobs
+    }
+
+    private func fetch(url: URL) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("CIStatus", forHTTPHeaderField: "User-Agent")
@@ -949,9 +1043,7 @@ struct GitHubActionsClient {
             throw ClientError.api(httpResponse.statusCode, apiError?.message, isAuthenticated: token != nil)
         }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(WorkflowRunsResponse.self, from: data).workflowRuns
+        return (data, httpResponse)
     }
 
     private static func token() -> String? {
@@ -1026,6 +1118,64 @@ struct WorkflowRunsResponse: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case workflowRuns = "workflow_runs"
+    }
+}
+
+struct WorkflowJobsResponse: Decodable {
+    let jobs: [WorkflowJob]
+}
+
+struct WorkflowJob: Decodable, Identifiable {
+    let id: Int
+    let name: String
+    let status: String
+    let runnerName: String?
+    let runnerGroupName: String?
+    let labels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case status
+        case runnerName = "runner_name"
+        case runnerGroupName = "runner_group_name"
+        case labels
+    }
+
+    var isActive: Bool {
+        status != "completed"
+    }
+}
+
+struct RunnerSummary {
+    let displayText: String
+
+    init(jobs: [WorkflowJob]) {
+        let runnerNames = jobs
+            .filter { $0.status == "in_progress" }
+            .compactMap { $0.runnerName?.nilIfBlank }
+        let uniqueRunnerNames = Self.unique(runnerNames)
+
+        if uniqueRunnerNames.count == 1 {
+            displayText = uniqueRunnerNames[0]
+        } else if uniqueRunnerNames.count == 2 {
+            displayText = uniqueRunnerNames.joined(separator: ", ")
+        } else if uniqueRunnerNames.count > 1 {
+            displayText = "\(uniqueRunnerNames.count) active runners"
+        } else {
+            displayText = ""
+        }
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var uniqueValues: [String] = []
+
+        for value in values where seen.insert(value).inserted {
+            uniqueValues.append(value)
+        }
+
+        return uniqueValues
     }
 }
 
