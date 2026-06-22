@@ -6,6 +6,8 @@
 	<string>CIStatus</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.cistatus.app</string>
+	<key>CFBundleIconFile</key>
+	<string>CIStatus</string>
 	<key>CFBundleName</key>
 	<string>CIStatus</string>
 	<key>CFBundlePackageType</key>
