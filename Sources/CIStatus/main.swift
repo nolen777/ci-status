@@ -154,11 +154,12 @@ final class ActionsStatusModel: ObservableObject {
         do {
             var fetchedRuns: [WorkflowRun] = []
             for repository in repositories {
-                fetchedRuns += try await client.fetchRuns(repository: repository).map { run in
+                let repositoryRuns = try await client.fetchRuns(repository: repository).map { run in
                     var repositoryRun = run
                     repositoryRun.sourceRepository = repository
                     return repositoryRun
                 }
+                fetchedRuns += try await runsWithPullRequestState(repositoryRuns, repository: repository)
             }
             let sortedRuns = fetchedRuns.sorted { $0.createdAt > $1.createdAt }
             runs = sortedRuns
@@ -173,6 +174,42 @@ final class ActionsStatusModel: ObservableObject {
 
     func runnerSummary(for run: WorkflowRun) -> RunnerSummary? {
         runnerSummaries[run.id]
+    }
+
+    private func runsWithPullRequestState(_ runs: [WorkflowRun], repository: String) async throws -> [WorkflowRun] {
+        let pullRequestRunsByLookupKey = Dictionary(grouping: runs.filter(\.needsPullRequestState), by: \.pullRequestLookupKey)
+        guard !pullRequestRunsByLookupKey.isEmpty else {
+            return runs
+        }
+
+        var stateByRunID: [Int: String] = [:]
+        for (_, lookupRuns) in pullRequestRunsByLookupKey {
+            guard let lookupRun = lookupRuns.first,
+                  let headOwner = lookupRun.pullRequestHeadOwner(repository: repository) else {
+                continue
+            }
+
+            guard let pullRequests = try? await client.fetchPullRequests(
+                repository: repository,
+                headOwner: headOwner,
+                branch: lookupRun.branch
+            ) else {
+                continue
+            }
+
+            for run in lookupRuns {
+                guard let matchingPullRequest = pullRequests.first(where: { $0.head.sha == run.headSHA }) ?? pullRequests.first else {
+                    continue
+                }
+                stateByRunID[run.id] = matchingPullRequest.state
+            }
+        }
+
+        return runs.map { run in
+            var run = run
+            run.pullRequestState = stateByRunID[run.id]
+            return run
+        }
     }
 
     private func refreshRunnerSummaries(for activeRuns: [WorkflowRun]) async {
@@ -1023,6 +1060,28 @@ struct GitHubActionsClient {
         return try decoder.decode(WorkflowJobsResponse.self, from: data).jobs
     }
 
+    func fetchPullRequests(repository: String, headOwner: String, branch: String) async throws -> [PullRequestSummary] {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.github.com"
+        components.path = "/repos/\(repository)/pulls"
+        components.queryItems = [
+            URLQueryItem(name: "state", value: "all"),
+            URLQueryItem(name: "head", value: "\(headOwner):\(branch)"),
+            URLQueryItem(name: "per_page", value: "20")
+        ]
+
+        guard let url = components.url else {
+            throw ClientError.invalidRepository
+        }
+
+        let (data, _) = try await fetch(url: url)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([PullRequestSummary].self, from: data)
+    }
+
     private func fetch(url: URL) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -1125,6 +1184,15 @@ struct WorkflowJobsResponse: Decodable {
     let jobs: [WorkflowJob]
 }
 
+struct PullRequestSummary: Decodable {
+    let state: String
+    let head: PullRequestHead
+}
+
+struct PullRequestHead: Decodable {
+    let sha: String
+}
+
 struct WorkflowJob: Decodable, Identifiable {
     let id: Int
     let name: String
@@ -1186,10 +1254,13 @@ struct WorkflowRun: Decodable, Identifiable {
     let status: String
     let conclusion: String?
     let branch: String
+    let headSHA: String
+    let headRepository: WorkflowRunRepository?
     let htmlURL: URL
     let createdAt: Date
     let updatedAt: Date
     var sourceRepository = ""
+    var pullRequestState: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1198,6 +1269,8 @@ struct WorkflowRun: Decodable, Identifiable {
         case status
         case conclusion
         case branch = "head_branch"
+        case headSHA = "head_sha"
+        case headRepository = "head_repository"
         case htmlURL = "html_url"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -1259,6 +1332,23 @@ struct WorkflowRun: Decodable, Identifiable {
         "\(sourceRepository)\u{1F}\(name)\u{1F}\(branch)"
     }
 
+    var needsPullRequestState: Bool {
+        event == "pull_request" && statusKind == .failure
+    }
+
+    var pullRequestLookupKey: String {
+        "\(headRepository?.fullName ?? sourceRepository)\u{1F}\(branch)"
+    }
+
+    var isClosedPullRequestFailure: Bool {
+        needsPullRequestState && pullRequestState == "closed"
+    }
+
+    func pullRequestHeadOwner(repository: String) -> String? {
+        let fullName = headRepository?.fullName ?? repository
+        return fullName.split(separator: "/").first.map(String.init)
+    }
+
     func durationText(at date: Date) -> String {
         let endDate = statusKind == .running || statusKind == .queued ? date : updatedAt
         let text = Self.durationFormatter.string(from: max(0, endDate.timeIntervalSince(createdAt))) ?? ""
@@ -1273,6 +1363,14 @@ struct WorkflowRun: Decodable, Identifiable {
         formatter.zeroFormattingBehavior = .dropAll
         return formatter
     }()
+}
+
+struct WorkflowRunRepository: Decodable {
+    let fullName: String
+
+    enum CodingKeys: String, CodingKey {
+        case fullName = "full_name"
+    }
 }
 
 struct RunSections {
@@ -1315,7 +1413,8 @@ struct RunSections {
                 }
                 newerPassedKeys.insert(run.workflowBranchKey)
             case .failure:
-                guard !activeKeys.contains(run.workflowBranchKey),
+                guard !run.isClosedPullRequestFailure,
+                      !activeKeys.contains(run.workflowBranchKey),
                       !newerPassedKeys.contains(run.workflowBranchKey),
                       includedFailureKeys.insert(run.workflowBranchKey).inserted else {
                     continue
@@ -1406,7 +1505,8 @@ struct BranchStatus {
                 resolvedKeys.insert(run.workflowBranchKey)
                 passKeys.insert(run.workflowBranchKey)
             case .failure:
-                guard !activeKeys.contains(run.workflowBranchKey),
+                guard !run.isClosedPullRequestFailure,
+                      !activeKeys.contains(run.workflowBranchKey),
                       !resolvedKeys.contains(run.workflowBranchKey) else {
                     continue
                 }
