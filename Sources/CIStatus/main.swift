@@ -1405,12 +1405,15 @@ struct RunSections {
                 }
         }
 
-        for run in newestCompletedFirst {
+        for run in newestCompletedFirst where run.statusKind == .success {
+            if includedPassKeys.insert(run.workflowBranchKey).inserted {
+                recentPasses.append(run)
+            }
+        }
+
+        for run in newestStartedFirst {
             switch run.statusKind {
             case .success:
-                if includedPassKeys.insert(run.workflowBranchKey).inserted {
-                    recentPasses.append(run)
-                }
                 newerPassedKeys.insert(run.workflowBranchKey)
             case .failure:
                 guard !run.isClosedPullRequestFailure,
