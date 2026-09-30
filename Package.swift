@@ -17,6 +17,10 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI")
             ]
+        ),
+        .testTarget(
+            name: "CIStatusTests",
+            dependencies: ["CIStatus"]
         )
     ]
 )

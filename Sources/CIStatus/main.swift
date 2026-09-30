@@ -198,7 +198,7 @@ final class ActionsStatusModel: ObservableObject {
             }
 
             for run in lookupRuns {
-                guard let matchingPullRequest = pullRequests.first(where: { $0.head.sha == run.headSHA }) ?? pullRequests.first else {
+                guard let matchingPullRequest = run.matchingPullRequest(in: pullRequests) else {
                     continue
                 }
                 stateByRunID[run.id] = matchingPullRequest.state
@@ -1068,7 +1068,7 @@ struct GitHubActionsClient {
         components.queryItems = [
             URLQueryItem(name: "state", value: "all"),
             URLQueryItem(name: "head", value: "\(headOwner):\(branch)"),
-            URLQueryItem(name: "per_page", value: "20")
+            URLQueryItem(name: "per_page", value: "100")
         ]
 
         guard let url = components.url else {
@@ -1186,7 +1186,16 @@ struct WorkflowJobsResponse: Decodable {
 
 struct PullRequestSummary: Decodable {
     let state: String
+    let createdAt: Date
+    let closedAt: Date?
     let head: PullRequestHead
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case createdAt = "created_at"
+        case closedAt = "closed_at"
+        case head
+    }
 }
 
 struct PullRequestHead: Decodable {
@@ -1333,7 +1342,7 @@ struct WorkflowRun: Decodable, Identifiable {
     }
 
     var needsPullRequestState: Bool {
-        event == "pull_request" && statusKind == .failure
+        statusKind == .failure
     }
 
     var pullRequestLookupKey: String {
@@ -1341,7 +1350,17 @@ struct WorkflowRun: Decodable, Identifiable {
     }
 
     var isClosedPullRequestFailure: Bool {
-        needsPullRequestState && pullRequestState == "closed"
+        pullRequestState == "closed"
+    }
+
+    func matchingPullRequest(in pullRequests: [PullRequestSummary]) -> PullRequestSummary? {
+        let candidates = pullRequests
+            .filter { pullRequest in
+                pullRequest.createdAt <= createdAt &&
+                    (pullRequest.closedAt.map { createdAt <= $0 } ?? true)
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+        return candidates.first { $0.head.sha == headSHA } ?? candidates.first
     }
 
     func pullRequestHeadOwner(repository: String) -> String? {
